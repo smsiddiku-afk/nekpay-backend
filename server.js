@@ -31,7 +31,7 @@ const CONFIG = {
   PAY_URL: "https://api.nekpayment.com/pay/web",
 
   // These MUST be public URLs once deployed (not localhost)
-  NOTIFY_URL: "https://YOUR-BACKEND-DOMAIN.com/nekpay-callback",
+  NOTIFY_URL: "https://nekpay-backend.onrender.com/nekpay-callback",
   PAGE_URL: "https://YOUR-FRONTEND-DOMAIN.com/payment-result", // where user is redirected after paying
 };
 
