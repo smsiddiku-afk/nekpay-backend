@@ -1,27 +1,29 @@
 // NEKpay Payment Gateway Integration - Backend Server
 // -----------------------------------------------------
 // This server does 2 jobs:
-// 1. /create-order  -> Called by your frontend (Google AI Studio site) when
-//                       the user clicks "Deposit". It signs the request and
-//                       asks NEKpay for a payment link, then returns that
-//                       link to the frontend so the user can pay.
-// 2. /nekpay-callback -> Called by NEKpay's servers (NOT your frontend) once
-//                       the payment is completed. This verifies the sign and
-//                       updates the order as paid.
+// 1. /create-order  -> Called by your frontend
+// 2. /nekpay-callback -> Called by NEKpay's servers
 //
 // IMPORTANT: Keep this file and the .env file on your SERVER only.
-// Never put MCH_ID / MCH_KEY inside your frontend (React/Google AI Studio) code.
 
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
 const qs = require("querystring");
+const cors = require("cors");
 
 const app = express();
+
+// Enable CORS for frontend requests
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
 app.use(express.urlencoded({ extended: true })); // NEKpay sends form-urlencoded data
-// NOTE: capture the raw request body on every JSON request too — WinyPay's
-// callback signature must be verified against the exact raw bytes, not a
-// re-serialized version of the parsed object (which can differ slightly).
+
+// Capture raw body for signature verification
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -34,25 +36,20 @@ app.use(
 // 1. CONFIG — Test credentials from the NEKpay Bengal doc
 // ---------------------------------------------------------
 const CONFIG = {
-  MCH_ID: "999808888",          // Test Merchant ID (replace with real one later)
+  MCH_ID: "999808888",          // Test Merchant ID
   MCH_KEY: "64d1b8592c5d4c1e841586b7651af06e", // Test collection key
   PAY_TYPE: "2220",             // Channel code for Bengal
   PAY_URL: "https://api.nekpayment.com/pay/web",
 
-  // These MUST be public URLs once deployed (not localhost)
-  NOTIFY_URL: "https://YOUR-BACKEND-DOMAIN.com/nekpay-callback",
-  PAGE_URL: "https://YOUR-FRONTEND-DOMAIN.com/payment-result", // where user is redirected after paying
+  NOTIFY_URL: "https://nekpay-backend.onrender.com/nekpay-callback",
+  PAGE_URL: "https://novavest-a711c.web.app/payment-result",
 };
 
-// In-memory order store for demo purposes.
-// Replace this with a real database (MongoDB/Postgres/Firebase etc.) in production.
+// In-memory order store
 const orders = {};
 
 // ---------------------------------------------------------
 // 2. Helper: Generate MD5 sign
-// NEKpay's rule: sort params alphabetically by key, join as
-// key1=val1&key2=val2..., append &key=MCH_KEY at the end, then MD5 it.
-// (This matches the exact example string given in their docs.)
 // ---------------------------------------------------------
 function generateSign(params, secretKey) {
   const sortedKeys = Object.keys(params)
@@ -76,9 +73,7 @@ app.post("/create-order", async (req, res) => {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
-    // Generate a unique order number (use your own scheme in production, e.g. DB auto-increment + prefix)
     const mchOrderNo = "ORD" + Date.now();
-
     const orderDate = formatDate(new Date());
 
     const params = {
@@ -98,7 +93,6 @@ app.post("/create-order", async (req, res) => {
 
     params.sign = generateSign(params, CONFIG.MCH_KEY);
 
-    // Save order locally as "pending" before calling NEKpay
     orders[mchOrderNo] = {
       amount: params.trade_amount,
       status: "pending",
@@ -131,14 +125,13 @@ app.post("/create-order", async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 4. Callback — called by NEKpay servers when payment completes
+// 4. Callback — called by NEKpay servers
 // ---------------------------------------------------------
 app.post("/nekpay-callback", (req, res) => {
   try {
     const body = req.body;
     console.log("Received NEKpay callback:", body);
 
-    // Rebuild the signature the SAME way NEKpay did, to verify authenticity
     const expectedSign = generateSign(body, CONFIG.MCH_KEY);
 
     if (expectedSign !== body.sign) {
@@ -156,14 +149,11 @@ app.post("/nekpay-callback", (req, res) => {
     if (tradeResult === "1") {
       orders[mchOrderNo].status = "paid";
       orders[mchOrderNo].paidAmount = amount;
-      // TODO: update your real database here, credit user balance, etc.
       console.log(`Order ${mchOrderNo} marked as PAID`);
     } else {
       orders[mchOrderNo].status = "failed";
     }
 
-    // NEKpay requires exactly the plain text "success" response,
-    // otherwise it will keep resending the callback (up to 8 times).
     return res.status(200).send("success");
   } catch (err) {
     console.error("callback error:", err.message);
@@ -172,7 +162,7 @@ app.post("/nekpay-callback", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 5. (Optional) Check order status from frontend, e.g. while polling
+// 5. Check order status
 // ---------------------------------------------------------
 app.get("/order-status/:orderNo", (req, res) => {
   const order = orders[req.params.orderNo];
@@ -181,42 +171,25 @@ app.get("/order-status/:orderNo", (req, res) => {
 });
 
 // ===========================================================
+// WINYPAY Gateway
 // ===========================================================
-// WINYPAY (Gateway #2) — Bangladesh PayIn / PayOut
-// ===========================================================
-// Very different style from NEKpay:
-// - No MD5 signing on the request itself, just send merchant_code +
-//   secret_key directly in the JSON body (over HTTPS).
-// - Callback authenticity is verified using an HMAC-SHA256 signature
-//   sent in the "X-Callback-Sign" header, computed over the RAW JSON
-//   body using the secret_key.
-// - Must return exactly {"status":"success"} to acknowledge callback.
-// ===========================================================
-
 const WINYPAY_CONFIG = {
-  MERCHANT_CODE: "M1001",       // Test merchant code
-  SECRET_KEY: "abc123",         // Test PayIn key
-  PAYOUT_KEY: "abc123",         // Test PayOut key
-
-  // TEST environment (as given). Switch these to the LIVE base URL +
-  // /api/v1/live/payin.php & /api/v1/live/payout.php once NEKpay/WinyPay
-  // approves production access.
+  MERCHANT_CODE: "M1001",
+  SECRET_KEY: "abc123",
+  PAYOUT_KEY: "abc123",
   BASE_URL: "https://winypay.com",
   PAYIN_PATH: "/api/v1/test/payin.php",
   PAYOUT_PATH: "/api/v1/test/payout.php",
-
-  // Must be public URLs once deployed (not localhost)
   CALLBACK_URL: "https://nekpay-backend.onrender.com/winypay-callback",
   WITHDRAW_CALLBACK_URL: "https://nekpay-backend.onrender.com/winypay-payout-callback",
-  JUMP_URL: "https://YOUR-FRONTEND-DOMAIN.com/payment-result", // update after website is published
+  JUMP_URL: "https://novavest-a711c.web.app/payment-result",
 };
 
-// Separate in-memory store for WinyPay orders (demo only — use a real DB in production)
 const winypayOrders = {};
 const winypayPayouts = {};
 
 // -----------------------------------------------------------
-// 6. Create PayIn (Deposit) — called by your frontend
+// 6. Create PayIn (Deposit)
 // -----------------------------------------------------------
 app.post("/create-order-winypay", async (req, res) => {
   try {
@@ -234,7 +207,7 @@ app.post("/create-order-winypay", async (req, res) => {
       order_id: orderId,
       user_id: userId || "GUEST",
       order_amount: Number(amount).toFixed(2),
-      pay_type: payType || "bkash", // "bkash" or "nagad"
+      pay_type: payType || "bkash",
       current_time: formatDate(new Date()),
       jump_url: WINYPAY_CONFIG.JUMP_URL,
       callback_url: WINYPAY_CONFIG.CALLBACK_URL,
@@ -274,48 +247,41 @@ app.post("/create-order-winypay", async (req, res) => {
 });
 
 // -----------------------------------------------------------
-// 7. PayIn Callback — called by WinyPay's servers when deposit completes
+// 7. PayIn Callback
 // -----------------------------------------------------------
-// IMPORTANT: this route needs the RAW body (before JSON parsing) to verify
-// the HMAC signature correctly, so we capture it with express.json's verify hook.
 app.post("/winypay-callback", (req, res) => {
-    try {
-      const signatureHeader = req.headers["x-callback-sign"];
-      const expectedSign = crypto
-        .createHmac("sha256", WINYPAY_CONFIG.SECRET_KEY)
-        .update(req.rawBody)
-        .digest("hex");
+  try {
+    const signatureHeader = req.headers["x-callback-sign"];
+    const expectedSign = crypto
+      .createHmac("sha256", WINYPAY_CONFIG.SECRET_KEY)
+      .update(req.rawBody)
+      .digest("hex");
 
-      if (signatureHeader !== expectedSign) {
-        console.warn("WinyPay PayIn callback: signature mismatch!");
-        return res.status(400).json({ status: "error" });
-      }
-
-      const { order_id, status: txnStatus } = req.body;
-      console.log("WinyPay PayIn callback:", req.body);
-
-      if (!winypayOrders[order_id]) {
-        console.warn("Unknown WinyPay order:", order_id);
-      } else if (txnStatus === "success") {
-        winypayOrders[order_id].status = "paid";
-        // TODO: credit user balance in your real database here
-      } else {
-        winypayOrders[order_id].status = "failed";
-      }
-
-      // Callback may arrive twice (immediate + after 1s) — this is handled
-      // safely above since we only ever set the same final status.
-      return res.status(200).json({ status: "success" });
-    } catch (err) {
-      console.error("winypay-callback error:", err.message);
-      return res.status(500).json({ status: "error" });
+    if (signatureHeader !== expectedSign) {
+      console.warn("WinyPay PayIn callback: signature mismatch!");
+      return res.status(400).json({ status: "error" });
     }
+
+    const { order_id, status: txnStatus } = req.body;
+    console.log("WinyPay PayIn callback:", req.body);
+
+    if (!winypayOrders[order_id]) {
+      console.warn("Unknown WinyPay order:", order_id);
+    } else if (txnStatus === "success") {
+      winypayOrders[order_id].status = "paid";
+    } else {
+      winypayOrders[order_id].status = "failed";
+    }
+
+    return res.status(200).json({ status: "success" });
+  } catch (err) {
+    console.error("winypay-callback error:", err.message);
+    return res.status(500).json({ status: "error" });
+  }
 });
 
 // -----------------------------------------------------------
-// 8. Create PayOut (Withdrawal) — called by your ADMIN PANEL only,
-//    after you personally approve a withdrawal request. This is NOT
-//    triggered automatically by users.
+// 8. Create PayOut (Withdrawal)
 // -----------------------------------------------------------
 app.post("/create-payout-winypay", async (req, res) => {
   try {
@@ -333,7 +299,7 @@ app.post("/create-payout-winypay", async (req, res) => {
       order_id: orderId,
       user_id: userId || "GUEST",
       amount: Number(amount).toFixed(2),
-      pay_type: payType || "bkash", // "bkash" or "nagad"
+      pay_type: payType || "bkash",
       account_no: accountNo,
       account_name: accountName || "",
       current_time: formatDate(new Date()),
@@ -375,41 +341,41 @@ app.post("/create-payout-winypay", async (req, res) => {
 });
 
 // -----------------------------------------------------------
-// 9. PayOut Callback — called by WinyPay's servers when withdrawal completes
+// 9. PayOut Callback
 // -----------------------------------------------------------
 app.post("/winypay-payout-callback", (req, res) => {
-    try {
-      const signatureHeader = req.headers["x-callback-sign"];
-      const expectedSign = crypto
-        .createHmac("sha256", WINYPAY_CONFIG.PAYOUT_KEY)
-        .update(req.rawBody)
-        .digest("hex");
+  try {
+    const signatureHeader = req.headers["x-callback-sign"];
+    const expectedSign = crypto
+      .createHmac("sha256", WINYPAY_CONFIG.PAYOUT_KEY)
+      .update(req.rawBody)
+      .digest("hex");
 
-      if (signatureHeader !== expectedSign) {
-        console.warn("WinyPay PayOut callback: signature mismatch!");
-        return res.status(400).json({ status: "error" });
-      }
-
-      const { order_id, status: txnStatus } = req.body;
-      console.log("WinyPay PayOut callback:", req.body);
-
-      if (!winypayPayouts[order_id]) {
-        console.warn("Unknown WinyPay payout order:", order_id);
-      } else if (txnStatus === "success") {
-        winypayPayouts[order_id].status = "completed";
-      } else {
-        winypayPayouts[order_id].status = "failed";
-      }
-
-      return res.status(200).json({ status: "success" });
-    } catch (err) {
-      console.error("winypay-payout-callback error:", err.message);
-      return res.status(500).json({ status: "error" });
+    if (signatureHeader !== expectedSign) {
+      console.warn("WinyPay PayOut callback: signature mismatch!");
+      return res.status(400).json({ status: "error" });
     }
+
+    const { order_id, status: txnStatus } = req.body;
+    console.log("WinyPay PayOut callback:", req.body);
+
+    if (!winypayPayouts[order_id]) {
+      console.warn("Unknown WinyPay payout order:", order_id);
+    } else if (txnStatus === "success") {
+      winypayPayouts[order_id].status = "completed";
+    } else {
+      winypayPayouts[order_id].status = "failed";
+    }
+
+    return res.status(200).json({ status: "success" });
+  } catch (err) {
+    console.error("winypay-payout-callback error:", err.message);
+    return res.status(500).json({ status: "error" });
+  }
 });
 
 // -----------------------------------------------------------
-// 10. (Optional) Check WinyPay order/payout status
+// 10. Status checks
 // -----------------------------------------------------------
 app.get("/winypay-order-status/:orderNo", (req, res) => {
   const order = winypayOrders[req.params.orderNo];
