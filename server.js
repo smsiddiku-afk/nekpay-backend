@@ -53,7 +53,20 @@ const orders = {};
 // ---------------------------------------------------------
 function generateSign(params, secretKey) {
   const sortedKeys = Object.keys(params)
-    .filter((k) => params[k] !== "" && params[k] !== undefined && params[k] !== null && k !== "sign" && k !== "sign_type")
+    .filter((k) => {
+      const lower = k.toLowerCase();
+      return (
+        params[k] !== "" &&
+        params[k] !== undefined &&
+        params[k] !== null &&
+        lower !== "sign" &&
+        lower !== "sign_type" &&
+        lower !== "signtype" // NEKpay's callback sends "signType" (camelCase),
+        // while the outgoing request uses "sign_type" (snake_case).
+        // Both must be excluded from the signature string, or callback
+        // verification will always fail with "Signature mismatch".
+      );
+    })
     .sort();
 
   const baseString =
