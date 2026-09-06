@@ -33,12 +33,12 @@ app.use(
 );
 
 // ---------------------------------------------------------
-// 1. CONFIG — Test credentials from the NEKpay Bengal doc
+// 1. CONFIG — Live credentials for NEKpay
 // ---------------------------------------------------------
 const CONFIG = {
-  MCH_ID: "999808888",          // Test Merchant ID
-  MCH_KEY: "64d1b8592c5d4c1e841586b7651af06e", // Test collection key
-  PAY_TYPE: "2220",             // Channel code for Bengal
+  MCH_ID: "808258213",
+  MCH_KEY: "d3e912a25c7e4e059832173b16b9e3c9",
+  PAY_TYPE: "2220",             // Channel code
   PAY_URL: "https://api.nekpayment.com/pay/web",
 
   NOTIFY_URL: "https://nekpay-backend.onrender.com/nekpay-callback",
