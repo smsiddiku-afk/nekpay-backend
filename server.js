@@ -19,7 +19,16 @@ const qs = require("querystring");
 
 const app = express();
 app.use(express.urlencoded({ extended: true })); // NEKpay sends form-urlencoded data
-app.use(express.json());
+// NOTE: capture the raw request body on every JSON request too — WinyPay's
+// callback signature must be verified against the exact raw bytes, not a
+// re-serialized version of the parsed object (which can differ slightly).
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 // ---------------------------------------------------------
 // 1. CONFIG — Test credentials from the NEKpay Bengal doc
@@ -31,7 +40,7 @@ const CONFIG = {
   PAY_URL: "https://api.nekpayment.com/pay/web",
 
   // These MUST be public URLs once deployed (not localhost)
-  NOTIFY_URL: "https://nekpay-backend.onrender.com/nekpay-callback",
+  NOTIFY_URL: "https://YOUR-BACKEND-DOMAIN.com/nekpay-callback",
   PAGE_URL: "https://YOUR-FRONTEND-DOMAIN.com/payment-result", // where user is redirected after paying
 };
 
@@ -169,6 +178,249 @@ app.get("/order-status/:orderNo", (req, res) => {
   const order = orders[req.params.orderNo];
   if (!order) return res.status(404).json({ error: "Order not found" });
   res.json(order);
+});
+
+// ===========================================================
+// ===========================================================
+// WINYPAY (Gateway #2) — Bangladesh PayIn / PayOut
+// ===========================================================
+// Very different style from NEKpay:
+// - No MD5 signing on the request itself, just send merchant_code +
+//   secret_key directly in the JSON body (over HTTPS).
+// - Callback authenticity is verified using an HMAC-SHA256 signature
+//   sent in the "X-Callback-Sign" header, computed over the RAW JSON
+//   body using the secret_key.
+// - Must return exactly {"status":"success"} to acknowledge callback.
+// ===========================================================
+
+const WINYPAY_CONFIG = {
+  MERCHANT_CODE: "M1001",       // Test merchant code
+  SECRET_KEY: "abc123",         // Test PayIn key
+  PAYOUT_KEY: "abc123",         // Test PayOut key
+
+  // TEST environment (as given). Switch these to the LIVE base URL +
+  // /api/v1/live/payin.php & /api/v1/live/payout.php once NEKpay/WinyPay
+  // approves production access.
+  BASE_URL: "https://winypay.com",
+  PAYIN_PATH: "/api/v1/test/payin.php",
+  PAYOUT_PATH: "/api/v1/test/payout.php",
+
+  // Must be public URLs once deployed (not localhost)
+  CALLBACK_URL: "https://nekpay-backend.onrender.com/winypay-callback",
+  WITHDRAW_CALLBACK_URL: "https://nekpay-backend.onrender.com/winypay-payout-callback",
+  JUMP_URL: "https://YOUR-FRONTEND-DOMAIN.com/payment-result", // update after website is published
+};
+
+// Separate in-memory store for WinyPay orders (demo only — use a real DB in production)
+const winypayOrders = {};
+const winypayPayouts = {};
+
+// -----------------------------------------------------------
+// 6. Create PayIn (Deposit) — called by your frontend
+// -----------------------------------------------------------
+app.post("/create-order-winypay", async (req, res) => {
+  try {
+    const { amount, userId, payType } = req.body;
+
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid amount" });
+    }
+
+    const orderId = "DEP" + Date.now();
+
+    const payload = {
+      merchant_code: WINYPAY_CONFIG.MERCHANT_CODE,
+      secret_key: WINYPAY_CONFIG.SECRET_KEY,
+      order_id: orderId,
+      user_id: userId || "GUEST",
+      order_amount: Number(amount).toFixed(2),
+      pay_type: payType || "bkash", // "bkash" or "nagad"
+      current_time: formatDate(new Date()),
+      jump_url: WINYPAY_CONFIG.JUMP_URL,
+      callback_url: WINYPAY_CONFIG.CALLBACK_URL,
+    };
+
+    winypayOrders[orderId] = {
+      amount: payload.order_amount,
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    const response = await axios.post(
+      WINYPAY_CONFIG.BASE_URL + WINYPAY_CONFIG.PAYIN_PATH,
+      payload,
+      { headers: { "Content-Type": "application/json" } }
+    );
+
+    const data = response.data;
+
+    if (data.status === "success" && data.pay_url) {
+      return res.json({
+        success: true,
+        paymentLink: data.pay_url,
+        orderNo: orderId,
+      });
+    } else {
+      winypayOrders[orderId].status = "failed";
+      return res.status(400).json({
+        success: false,
+        message: data.message || "Order creation failed",
+      });
+    }
+  } catch (err) {
+    console.error("create-order-winypay error:", err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// -----------------------------------------------------------
+// 7. PayIn Callback — called by WinyPay's servers when deposit completes
+// -----------------------------------------------------------
+// IMPORTANT: this route needs the RAW body (before JSON parsing) to verify
+// the HMAC signature correctly, so we capture it with express.json's verify hook.
+app.post("/winypay-callback", (req, res) => {
+    try {
+      const signatureHeader = req.headers["x-callback-sign"];
+      const expectedSign = crypto
+        .createHmac("sha256", WINYPAY_CONFIG.SECRET_KEY)
+        .update(req.rawBody)
+        .digest("hex");
+
+      if (signatureHeader !== expectedSign) {
+        console.warn("WinyPay PayIn callback: signature mismatch!");
+        return res.status(400).json({ status: "error" });
+      }
+
+      const { order_id, status: txnStatus } = req.body;
+      console.log("WinyPay PayIn callback:", req.body);
+
+      if (!winypayOrders[order_id]) {
+        console.warn("Unknown WinyPay order:", order_id);
+      } else if (txnStatus === "success") {
+        winypayOrders[order_id].status = "paid";
+        // TODO: credit user balance in your real database here
+      } else {
+        winypayOrders[order_id].status = "failed";
+      }
+
+      // Callback may arrive twice (immediate + after 1s) — this is handled
+      // safely above since we only ever set the same final status.
+      return res.status(200).json({ status: "success" });
+    } catch (err) {
+      console.error("winypay-callback error:", err.message);
+      return res.status(500).json({ status: "error" });
+    }
+});
+
+// -----------------------------------------------------------
+// 8. Create PayOut (Withdrawal) — called by your ADMIN PANEL only,
+//    after you personally approve a withdrawal request. This is NOT
+//    triggered automatically by users.
+// -----------------------------------------------------------
+app.post("/create-payout-winypay", async (req, res) => {
+  try {
+    const { amount, userId, accountNo, accountName, payType } = req.body;
+
+    if (!amount || Number(amount) <= 0 || !accountNo) {
+      return res.status(400).json({ success: false, message: "Invalid amount or account number" });
+    }
+
+    const orderId = "WDR" + Date.now();
+
+    const payload = {
+      merchant_code: WINYPAY_CONFIG.MERCHANT_CODE,
+      payout_key: WINYPAY_CONFIG.PAYOUT_KEY,
+      order_id: orderId,
+      user_id: userId || "GUEST",
+      amount: Number(amount).toFixed(2),
+      pay_type: payType || "bkash", // "bkash" or "nagad"
+      account_no: accountNo,
+      account_name: accountName || "",
+      current_time: formatDate(new Date()),
+      callback_url: WINYPAY_CONFIG.WITHDRAW_CALLBACK_URL,
+    };
+
+    winypayPayouts[orderId] = {
+      amount: payload.amount,
+      accountNo,
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    const response = await axios.post(
+      WINYPAY_CONFIG.BASE_URL + WINYPAY_CONFIG.PAYOUT_PATH,
+      payload,
+      { headers: { "Content-Type": "application/json" } }
+    );
+
+    const data = response.data;
+
+    if (data.status === "success") {
+      return res.json({
+        success: true,
+        message: data.message,
+        orderNo: orderId,
+      });
+    } else {
+      winypayPayouts[orderId].status = "failed";
+      return res.status(400).json({
+        success: false,
+        message: data.message || "Payout request failed",
+      });
+    }
+  } catch (err) {
+    console.error("create-payout-winypay error:", err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// -----------------------------------------------------------
+// 9. PayOut Callback — called by WinyPay's servers when withdrawal completes
+// -----------------------------------------------------------
+app.post("/winypay-payout-callback", (req, res) => {
+    try {
+      const signatureHeader = req.headers["x-callback-sign"];
+      const expectedSign = crypto
+        .createHmac("sha256", WINYPAY_CONFIG.PAYOUT_KEY)
+        .update(req.rawBody)
+        .digest("hex");
+
+      if (signatureHeader !== expectedSign) {
+        console.warn("WinyPay PayOut callback: signature mismatch!");
+        return res.status(400).json({ status: "error" });
+      }
+
+      const { order_id, status: txnStatus } = req.body;
+      console.log("WinyPay PayOut callback:", req.body);
+
+      if (!winypayPayouts[order_id]) {
+        console.warn("Unknown WinyPay payout order:", order_id);
+      } else if (txnStatus === "success") {
+        winypayPayouts[order_id].status = "completed";
+      } else {
+        winypayPayouts[order_id].status = "failed";
+      }
+
+      return res.status(200).json({ status: "success" });
+    } catch (err) {
+      console.error("winypay-payout-callback error:", err.message);
+      return res.status(500).json({ status: "error" });
+    }
+});
+
+// -----------------------------------------------------------
+// 10. (Optional) Check WinyPay order/payout status
+// -----------------------------------------------------------
+app.get("/winypay-order-status/:orderNo", (req, res) => {
+  const order = winypayOrders[req.params.orderNo];
+  if (!order) return res.status(404).json({ error: "Order not found" });
+  res.json(order);
+});
+
+app.get("/winypay-payout-status/:orderNo", (req, res) => {
+  const payout = winypayPayouts[req.params.orderNo];
+  if (!payout) return res.status(404).json({ error: "Payout not found" });
+  res.json(payout);
 });
 
 // ---------------------------------------------------------
