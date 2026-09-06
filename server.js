@@ -65,7 +65,7 @@ function generateSign(params, secretKey) {
 // ---------------------------------------------------------
 // 3. Create Order — called by your frontend
 // ---------------------------------------------------------
-app.post("/create-order", async (req, res) => {
+app.post(["/create-order", "/api/v1/nekpay/create-order"], async (req, res) => {
   try {
     const { amount, payerName } = req.body;
 
