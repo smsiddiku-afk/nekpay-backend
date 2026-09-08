@@ -197,8 +197,8 @@ app.get("/order-status/:orderNo", (req, res) => {
 // it, and adjust field names if WatchPay returns an error.
 // ===========================================================
 const WATCHPAY_CONFIG = {
-  MCH_ID: "955001001",              // Test merchant ID (Bangladesh)
-  MCH_KEY: "e67d789a20e44abe98e9a4187559d060", // Test payment key
+  MCH_ID: "955666713",              // Real merchant ID (Bangladesh)
+  MCH_KEY: "e3effb980e594817ba30968942af2494", // Real payment key
   PAY_TYPE: "2220",                 // Bangladesh Gateway Category 2
   PAY_URL: "https://api.watchglb.com/pay/web",
 
