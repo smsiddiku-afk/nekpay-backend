@@ -7,7 +7,7 @@ const qs = require("querystring");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
-// ১. Firebase ইনিশিয়ালাইজেশন
+// ১. Firebase Admin ইনিশিয়ালাইজেশন
 const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
@@ -166,7 +166,7 @@ app.post("/nekpay-callback", async (req, res) => {
     const expectedSign = generateSign(body, CONFIG.MCH_KEY);
 
     if (expectedSign !== body.sign) {
-      console.warn("NEKpay signature mismatch!");
+      console.warn("Signature mismatch!");
       return res.status(400).send("fail");
     }
 
@@ -196,7 +196,7 @@ app.post("/nekpay-callback", async (req, res) => {
       return res.status(200).send("success");
     }
   } catch (err) {
-    console.error("NEKpay callback error:", err.message);
+    console.error("callback error:", err.message);
     return res.status(500).send("fail");
   }
 });
@@ -239,7 +239,7 @@ app.post("/create-order-watchpay", async (req, res) => {
       createdAt: new Date(),
     };
 
-    // ফায়ারবেসে পেন্ডিং ট্রানজেকশন সংরক্ষণ
+    // ফায়ারবেসে পেন্ডিং ট্রানজেকশন রেকর্ড
     await db.collection("deposits").doc(mchOrderNo).set({
       orderNo: mchOrderNo,
       userId: userId || "guest",
@@ -281,7 +281,7 @@ app.post("/watchpay-callback", async (req, res) => {
     const expectedSign = generateSign(body, WATCHPAY_CONFIG.MCH_KEY);
 
     if (expectedSign !== body.sign) {
-      console.warn("WatchPay signature mismatch!");
+      console.warn("WatchPay callback: signature mismatch!");
       return res.status(400).send("fail");
     }
 
@@ -291,7 +291,7 @@ app.post("/watchpay-callback", async (req, res) => {
       const depositAmount = Number(amount);
       const targetUserId = (watchpayOrders[mchOrderNo] && watchpayOrders[mchOrderNo].userId) || merRetMsg;
 
-      // ১. Deposits কালেকশনে সাকসেস স্ট্যাটাস আপডেট
+      // ১. Deposits কালেকশনে স্ট্যাটাস সাকসেস করা
       await db.collection("deposits").doc(mchOrderNo).set({
         orderNo: mchOrderNo,
         userId: targetUserId,
@@ -300,12 +300,12 @@ app.post("/watchpay-callback", async (req, res) => {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
 
-      // ২. Users কালেকশনে স্বয়ংক্রিয় ব্যালেন্স বৃদ্ধি
+      // ২. Users কালেকশনে স্বয়ংক্রিয় ব্যালেন্স বৃদ্ধি করা
       if (targetUserId && targetUserId !== "guest" && targetUserId !== "deposit") {
         await db.collection("users").doc(targetUserId).update({
           balance: admin.firestore.FieldValue.increment(depositAmount)
         });
-        console.log(`Successfully added ${depositAmount} to user ${targetUserId}`);
+        console.log(`Balance of ${depositAmount} BDT added to user: ${targetUserId}`);
       }
 
       return res.status(200).send("success");
@@ -319,8 +319,14 @@ app.post("/watchpay-callback", async (req, res) => {
   }
 });
 
+app.get("/watchpay-order-status/:orderNo", (req, res) => {
+  const order = watchpayOrders[req.params.orderNo];
+  if (!order) return res.status(404).json({ error: "Order not found" });
+  res.json(order);
+});
+
 app.get("/order-status/:orderNo", (req, res) => {
-  const order = orders[req.params.orderNo] || watchpayOrders[req.params.orderNo];
+  const order = orders[req.params.orderNo];
   if (!order) return res.status(404).json({ error: "Order not found" });
   res.json(order);
 });
