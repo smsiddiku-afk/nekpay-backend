@@ -7,11 +7,15 @@ const qs = require("querystring");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
-// ১. Firebase Admin ইনিশিয়ালাইজেশন
+// ১. Firebase Admin ইনিশিয়ালাইজেশন এবং Private Key ফরম্যাট ফিক্স
 const serviceAccount = require("./serviceAccountKey.json");
 
+if (serviceAccount.private_key) {
+  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+}
+
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert(serviceAccount),
 });
 
 const db = admin.firestore();
@@ -132,7 +136,7 @@ app.post(["/create-order", "/api/v1/nekpay/create-order"], async (req, res) => {
       amount: Number(params.trade_amount),
       status: "pending",
       gateway: "NEKpay",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     const response = await axios.post(CONFIG.PAY_URL, qs.stringify(params), {
@@ -174,25 +178,42 @@ app.post("/nekpay-callback", async (req, res) => {
 
     if (tradeResult === "1") {
       const depositAmount = Number(amount);
-      const targetUserId = (orders[mchOrderNo] && orders[mchOrderNo].userId) || merRetMsg;
+      const targetUserId =
+        (orders[mchOrderNo] && orders[mchOrderNo].userId) || merRetMsg;
 
-      await db.collection("deposits").doc(mchOrderNo).set({
-        orderNo: mchOrderNo,
-        userId: targetUserId,
-        amount: depositAmount,
-        status: "success",
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
+      await db
+        .collection("deposits")
+        .doc(mchOrderNo)
+        .set(
+          {
+            orderNo: mchOrderNo,
+            userId: targetUserId,
+            amount: depositAmount,
+            status: "success",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
 
-      if (targetUserId && targetUserId !== "guest" && targetUserId !== "deposit") {
-        await db.collection("users").doc(targetUserId).update({
-          balance: admin.firestore.FieldValue.increment(depositAmount)
-        });
+      if (
+        targetUserId &&
+        targetUserId !== "guest" &&
+        targetUserId !== "deposit"
+      ) {
+        await db
+          .collection("users")
+          .doc(targetUserId)
+          .update({
+            balance: admin.firestore.FieldValue.increment(depositAmount),
+          });
       }
 
       return res.status(200).send("success");
     } else {
-      await db.collection("deposits").doc(mchOrderNo).update({ status: "failed" });
+      await db
+        .collection("deposits")
+        .doc(mchOrderNo)
+        .update({ status: "failed" });
       return res.status(200).send("success");
     }
   } catch (err) {
@@ -209,7 +230,9 @@ app.post("/create-order-watchpay", async (req, res) => {
     const { amount, payerName, userId } = req.body;
 
     if (!amount || Number(amount) <= 0) {
-      return res.status(400).json({ success: false, message: "Invalid amount" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid amount" });
     }
 
     const mchOrderNo = "WPY" + Date.now();
@@ -239,19 +262,22 @@ app.post("/create-order-watchpay", async (req, res) => {
       createdAt: new Date(),
     };
 
-    // ফায়ারবেসে পেন্ডিং ট্রানজেকশন রেকর্ড
     await db.collection("deposits").doc(mchOrderNo).set({
       orderNo: mchOrderNo,
       userId: userId || "guest",
       amount: Number(params.trade_amount),
       status: "pending",
       gateway: "WatchPay",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    const response = await axios.post(WATCHPAY_CONFIG.PAY_URL, qs.stringify(params), {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
+    const response = await axios.post(
+      WATCHPAY_CONFIG.PAY_URL,
+      qs.stringify(params),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
 
     const data = response.data;
 
@@ -289,28 +315,46 @@ app.post("/watchpay-callback", async (req, res) => {
 
     if (tradeResult === "1") {
       const depositAmount = Number(amount);
-      const targetUserId = (watchpayOrders[mchOrderNo] && watchpayOrders[mchOrderNo].userId) || merRetMsg;
+      const targetUserId =
+        (watchpayOrders[mchOrderNo] && watchpayOrders[mchOrderNo].userId) ||
+        merRetMsg;
 
-      // ১. Deposits কালেকশনে স্ট্যাটাস সাকসেস করা
-      await db.collection("deposits").doc(mchOrderNo).set({
-        orderNo: mchOrderNo,
-        userId: targetUserId,
-        amount: depositAmount,
-        status: "success",
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
+      await db
+        .collection("deposits")
+        .doc(mchOrderNo)
+        .set(
+          {
+            orderNo: mchOrderNo,
+            userId: targetUserId,
+            amount: depositAmount,
+            status: "success",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
 
-      // ২. Users কালেকশনে স্বয়ংক্রিয় ব্যালেন্স বৃদ্ধি করা
-      if (targetUserId && targetUserId !== "guest" && targetUserId !== "deposit") {
-        await db.collection("users").doc(targetUserId).update({
-          balance: admin.firestore.FieldValue.increment(depositAmount)
-        });
-        console.log(`Balance of ${depositAmount} BDT added to user: ${targetUserId}`);
+      if (
+        targetUserId &&
+        targetUserId !== "guest" &&
+        targetUserId !== "deposit"
+      ) {
+        await db
+          .collection("users")
+          .doc(targetUserId)
+          .update({
+            balance: admin.firestore.FieldValue.increment(depositAmount),
+          });
+        console.log(
+          `Balance of ${depositAmount} BDT added to user: ${targetUserId}`
+        );
       }
 
       return res.status(200).send("success");
     } else {
-      await db.collection("deposits").doc(mchOrderNo).update({ status: "failed" });
+      await db
+        .collection("deposits")
+        .doc(mchOrderNo)
+        .update({ status: "failed" });
       return res.status(200).send("success");
     }
   } catch (err) {
