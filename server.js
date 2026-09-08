@@ -1,11 +1,5 @@
-// NEKpay Payment Gateway Integration - Backend Server
-// -----------------------------------------------------
-// This server does 2 jobs:
-// 1. /create-order  -> Called by your frontend
-// 2. /nekpay-callback -> Called by NEKpay's servers
-//
-// IMPORTANT: Keep this file and the .env file on your SERVER only.
-
+// NEKpay & WatchPay Payment Gateway Integration - Backend Server
+// -------------------------------------------------------------
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
@@ -15,13 +9,15 @@ const cors = require("cors");
 const app = express();
 
 // Enable CORS for frontend requests
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-app.use(express.urlencoded({ extended: true })); // NEKpay sends form-urlencoded data
+app.use(express.urlencoded({ extended: true }));
 
 // Capture raw body for signature verification
 app.use(
@@ -33,20 +29,29 @@ app.use(
 );
 
 // ---------------------------------------------------------
-// 1. CONFIG — Live credentials for NEKpay
+// 1. CONFIG — Live credentials
 // ---------------------------------------------------------
 const CONFIG = {
   MCH_ID: "808258213",
   MCH_KEY: "d3e912a25c7e4e059832173b16b9e3c9",
-  PAY_TYPE: "2220",             // Channel code
+  PAY_TYPE: "2220",
   PAY_URL: "https://api.nekpayment.com/pay/web",
-
   NOTIFY_URL: "https://nekpay-backend.onrender.com/nekpay-callback",
   PAGE_URL: "https://novavest-a711c.web.app/payment-result",
 };
 
-// In-memory order store
+const WATCHPAY_CONFIG = {
+  MCH_ID: "955666713", // Live merchant ID
+  MCH_KEY: "e3effb980e594817ba30968942af2494", // Live payment key
+  PAY_TYPE: "2220",
+  PAY_URL: "https://api.watchglb.com/pay/web",
+  NOTIFY_URL: "https://nekpay-backend.onrender.com/watchpay-callback",
+  PAGE_URL: "https://novavest-a711c.web.app/payment-result",
+};
+
+// In-memory order stores
 const orders = {};
+const watchpayOrders = {};
 
 // ---------------------------------------------------------
 // 2. Helper: Generate MD5 sign
@@ -61,10 +66,7 @@ function generateSign(params, secretKey) {
         params[k] !== null &&
         lower !== "sign" &&
         lower !== "sign_type" &&
-        lower !== "signtype" // NEKpay's callback sends "signType" (camelCase),
-        // while the outgoing request uses "sign_type" (snake_case).
-        // Both must be excluded from the signature string, or callback
-        // verification will always fail with "Signature mismatch".
+        lower !== "signtype"
       );
     })
     .sort();
@@ -75,8 +77,15 @@ function generateSign(params, secretKey) {
   return crypto.createHash("md5").update(baseString, "utf8").digest("hex");
 }
 
+function formatDate(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 // ---------------------------------------------------------
-// 3. Create Order — called by your frontend
+// 3. NEKpay: Create Order & Callback
 // ---------------------------------------------------------
 app.post(["/create-order", "/api/v1/nekpay/create-order"], async (req, res) => {
   try {
@@ -137,9 +146,6 @@ app.post(["/create-order", "/api/v1/nekpay/create-order"], async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------
-// 4. Callback — called by NEKpay servers
-// ---------------------------------------------------------
 app.post("/nekpay-callback", (req, res) => {
   try {
     const body = req.body;
@@ -174,43 +180,15 @@ app.post("/nekpay-callback", (req, res) => {
   }
 });
 
-// ---------------------------------------------------------
-// 5. Check order status
-// ---------------------------------------------------------
 app.get("/order-status/:orderNo", (req, res) => {
   const order = orders[req.params.orderNo];
   if (!order) return res.status(404).json({ error: "Order not found" });
   res.json(order);
 });
 
-// ===========================================================
-// WATCHPAY (Gateway #2) — Bangladesh Deposit
-// ===========================================================
-// NOTE: Built from WatchPay's merchant credential sheet, not the full
-// ShowDoc API reference (that page is password-protected and its
-// exact request/response fields were not retrievable). Its base URL
-// pattern (https://api.watchglb.com/pay/web) is identical to NEKpay's
-// (https://api.nekpayment.com/pay/web), which strongly suggests both
-// run on the same white-label gateway platform with the same request
-// contract. This code mirrors NEKpay's proven format as a best-effort
-// starting point — test it with a small real deposit before relying on
-// it, and adjust field names if WatchPay returns an error.
-// ===========================================================
-const WATCHPAY_CONFIG = {
-  MCH_ID: "955666713",              // Real merchant ID (Bangladesh)
-  MCH_KEY: "e3effb980e594817ba30968942af2494", // Real payment key
-  PAY_TYPE: "2220",                 // Bangladesh Gateway Category 2
-  PAY_URL: "https://api.watchglb.com/pay/web",
-
-  NOTIFY_URL: "https://nekpay-backend.onrender.com/watchpay-callback",
-  PAGE_URL: "https://novavest-a711c.web.app/payment-result",
-};
-
-const watchpayOrders = {};
-
-// -----------------------------------------------------------
-// 6. Create Order (Deposit) — called by your frontend
-// -----------------------------------------------------------
+// ---------------------------------------------------------
+// 4. WatchPay: Create Order & Callback
+// ---------------------------------------------------------
 app.post("/create-order-watchpay", async (req, res) => {
   try {
     const { amount, payerName } = req.body;
@@ -239,6 +217,9 @@ app.post("/create-order-watchpay", async (req, res) => {
 
     params.sign = generateSign(params, WATCHPAY_CONFIG.MCH_KEY);
 
+    // WatchPay-তে কোন ডেটা যাচ্ছে তা লগে দেখা যাবে
+    console.log("--> Outgoing WatchPay Request Data:", params);
+
     watchpayOrders[mchOrderNo] = {
       amount: params.trade_amount,
       status: "pending",
@@ -250,6 +231,7 @@ app.post("/create-order-watchpay", async (req, res) => {
     });
 
     const data = response.data;
+    console.log("<-- WatchPay Gateway Response:", data);
 
     if (data.respCode === "SUCCESS" && data.tradeResult === "1") {
       return res.json({
@@ -262,7 +244,7 @@ app.post("/create-order-watchpay", async (req, res) => {
       return res.status(400).json({
         success: false,
         message: (data && (data.tradeMsg || data.message)) || "Order creation failed",
-        raw: data, // included temporarily to help debug the actual field names WatchPay returns
+        raw: data,
       });
     }
   } catch (err) {
@@ -271,9 +253,6 @@ app.post("/create-order-watchpay", async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------
-// 7. Callback — called by WatchPay's servers
-// -----------------------------------------------------------
 app.post("/watchpay-callback", (req, res) => {
   try {
     const body = req.body;
@@ -297,6 +276,8 @@ app.post("/watchpay-callback", (req, res) => {
       watchpayOrders[mchOrderNo].status = "paid";
       watchpayOrders[mchOrderNo].paidAmount = amount;
       console.log(`WatchPay order ${mchOrderNo} marked as PAID`);
+
+      // TODO: আপনার ডাটাবেজে ইউজারের ব্যালেন্স যোগ করার ফাংশন এখানে কল করুন
     } else {
       watchpayOrders[mchOrderNo].status = "failed";
     }
@@ -308,9 +289,6 @@ app.post("/watchpay-callback", (req, res) => {
   }
 });
 
-// -----------------------------------------------------------
-// 8. Check order status
-// -----------------------------------------------------------
 app.get("/watchpay-order-status/:orderNo", (req, res) => {
   const order = watchpayOrders[req.params.orderNo];
   if (!order) return res.status(404).json({ error: "Order not found" });
@@ -318,12 +296,5 @@ app.get("/watchpay-order-status/:orderNo", (req, res) => {
 });
 
 // ---------------------------------------------------------
-function formatDate(d) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`NEKpay backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Payment backend running on port ${PORT}`));
