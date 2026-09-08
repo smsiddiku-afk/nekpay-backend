@@ -184,222 +184,137 @@ app.get("/order-status/:orderNo", (req, res) => {
 });
 
 // ===========================================================
-// WINYPAY Gateway
+// WATCHPAY (Gateway #2) — Bangladesh Deposit
 // ===========================================================
-const WINYPAY_CONFIG = {
-  MERCHANT_CODE: "M1001",
-  SECRET_KEY: "abc123",
-  PAYOUT_KEY: "abc123",
-  BASE_URL: "https://winypay.com",
-  PAYIN_PATH: "/api/v1/test/payin.php",
-  PAYOUT_PATH: "/api/v1/test/payout.php",
-  CALLBACK_URL: "https://nekpay-backend.onrender.com/winypay-callback",
-  WITHDRAW_CALLBACK_URL: "https://nekpay-backend.onrender.com/winypay-payout-callback",
-  JUMP_URL: "https://novavest-a711c.web.app/payment-result",
+// NOTE: Built from WatchPay's merchant credential sheet, not the full
+// ShowDoc API reference (that page is password-protected and its
+// exact request/response fields were not retrievable). Its base URL
+// pattern (https://api.watchglb.com/pay/web) is identical to NEKpay's
+// (https://api.nekpayment.com/pay/web), which strongly suggests both
+// run on the same white-label gateway platform with the same request
+// contract. This code mirrors NEKpay's proven format as a best-effort
+// starting point — test it with a small real deposit before relying on
+// it, and adjust field names if WatchPay returns an error.
+// ===========================================================
+const WATCHPAY_CONFIG = {
+  MCH_ID: "955001001",              // Test merchant ID (Bangladesh)
+  MCH_KEY: "e67d789a20e44abe98e9a4187559d060", // Test payment key
+  PAY_TYPE: "2220",                 // Bangladesh Gateway Category 2
+  PAY_URL: "https://api.watchglb.com/pay/web",
+
+  NOTIFY_URL: "https://nekpay-backend.onrender.com/watchpay-callback",
+  PAGE_URL: "https://novavest-a711c.web.app/payment-result",
 };
 
-const winypayOrders = {};
-const winypayPayouts = {};
+const watchpayOrders = {};
 
 // -----------------------------------------------------------
-// 6. Create PayIn (Deposit)
+// 6. Create Order (Deposit) — called by your frontend
 // -----------------------------------------------------------
-app.post("/create-order-winypay", async (req, res) => {
+app.post("/create-order-watchpay", async (req, res) => {
   try {
-    const { amount, userId, payType } = req.body;
+    const { amount, payerName } = req.body;
 
     if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ success: false, message: "Invalid amount" });
     }
 
-    const orderId = "DEP" + Date.now();
+    const mchOrderNo = "WPY" + Date.now();
+    const orderDate = formatDate(new Date());
 
-    const payload = {
-      merchant_code: WINYPAY_CONFIG.MERCHANT_CODE,
-      secret_key: WINYPAY_CONFIG.SECRET_KEY,
-      order_id: orderId,
-      user_id: userId || "GUEST",
-      order_amount: Number(amount).toFixed(2),
-      pay_type: payType || "bkash",
-      current_time: formatDate(new Date()),
-      jump_url: WINYPAY_CONFIG.JUMP_URL,
-      callback_url: WINYPAY_CONFIG.CALLBACK_URL,
+    const params = {
+      version: "1.0",
+      mch_id: WATCHPAY_CONFIG.MCH_ID,
+      notify_url: WATCHPAY_CONFIG.NOTIFY_URL,
+      page_url: WATCHPAY_CONFIG.PAGE_URL,
+      mch_order_no: mchOrderNo,
+      pay_type: WATCHPAY_CONFIG.PAY_TYPE,
+      trade_amount: Number(amount).toFixed(2),
+      order_date: orderDate,
+      goods_name: "Deposit",
+      mch_return_msg: "deposit",
+      payer_name: payerName || "Customer",
+      sign_type: "MD5",
     };
 
-    winypayOrders[orderId] = {
-      amount: payload.order_amount,
+    params.sign = generateSign(params, WATCHPAY_CONFIG.MCH_KEY);
+
+    watchpayOrders[mchOrderNo] = {
+      amount: params.trade_amount,
       status: "pending",
       createdAt: new Date(),
     };
 
-    const response = await axios.post(
-      WINYPAY_CONFIG.BASE_URL + WINYPAY_CONFIG.PAYIN_PATH,
-      payload,
-      { headers: { "Content-Type": "application/json" } }
-    );
+    const response = await axios.post(WATCHPAY_CONFIG.PAY_URL, qs.stringify(params), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
 
     const data = response.data;
 
-    if (data.status === "success" && data.pay_url) {
+    if (data.respCode === "SUCCESS" && data.tradeResult === "1") {
       return res.json({
         success: true,
-        paymentLink: data.pay_url,
-        orderNo: orderId,
+        paymentLink: data.payInfo,
+        orderNo: mchOrderNo,
       });
     } else {
-      winypayOrders[orderId].status = "failed";
+      watchpayOrders[mchOrderNo].status = "failed";
       return res.status(400).json({
         success: false,
-        message: data.message || "Order creation failed",
+        message: (data && (data.tradeMsg || data.message)) || "Order creation failed",
+        raw: data, // included temporarily to help debug the actual field names WatchPay returns
       });
     }
   } catch (err) {
-    console.error("create-order-winypay error:", err.message);
-    return res.status(500).json({ success: false, message: "Server error" });
+    console.error("create-order-watchpay error:", err.message);
+    return res.status(500).json({ success: false, message: "Server error", detail: err.message });
   }
 });
 
 // -----------------------------------------------------------
-// 7. PayIn Callback
+// 7. Callback — called by WatchPay's servers
 // -----------------------------------------------------------
-app.post("/winypay-callback", (req, res) => {
+app.post("/watchpay-callback", (req, res) => {
   try {
-    const signatureHeader = req.headers["x-callback-sign"];
-    const expectedSign = crypto
-      .createHmac("sha256", WINYPAY_CONFIG.SECRET_KEY)
-      .update(req.rawBody)
-      .digest("hex");
+    const body = req.body;
+    console.log("Received WatchPay callback:", body);
 
-    if (signatureHeader !== expectedSign) {
-      console.warn("WinyPay PayIn callback: signature mismatch!");
-      return res.status(400).json({ status: "error" });
+    const expectedSign = generateSign(body, WATCHPAY_CONFIG.MCH_KEY);
+
+    if (expectedSign !== body.sign) {
+      console.warn("WatchPay callback: signature mismatch! Possible fake callback.");
+      return res.status(400).send("fail");
     }
 
-    const { order_id, status: txnStatus } = req.body;
-    console.log("WinyPay PayIn callback:", req.body);
+    const { mchOrderNo, tradeResult, amount } = body;
 
-    if (!winypayOrders[order_id]) {
-      console.warn("Unknown WinyPay order:", order_id);
-    } else if (txnStatus === "success") {
-      winypayOrders[order_id].status = "paid";
+    if (!watchpayOrders[mchOrderNo]) {
+      console.warn("Unknown WatchPay order:", mchOrderNo);
+      return res.status(400).send("fail");
+    }
+
+    if (tradeResult === "1") {
+      watchpayOrders[mchOrderNo].status = "paid";
+      watchpayOrders[mchOrderNo].paidAmount = amount;
+      console.log(`WatchPay order ${mchOrderNo} marked as PAID`);
     } else {
-      winypayOrders[order_id].status = "failed";
+      watchpayOrders[mchOrderNo].status = "failed";
     }
 
-    return res.status(200).json({ status: "success" });
+    return res.status(200).send("success");
   } catch (err) {
-    console.error("winypay-callback error:", err.message);
-    return res.status(500).json({ status: "error" });
+    console.error("watchpay-callback error:", err.message);
+    return res.status(500).send("fail");
   }
 });
 
 // -----------------------------------------------------------
-// 8. Create PayOut (Withdrawal)
+// 8. Check order status
 // -----------------------------------------------------------
-app.post("/create-payout-winypay", async (req, res) => {
-  try {
-    const { amount, userId, accountNo, accountName, payType } = req.body;
-
-    if (!amount || Number(amount) <= 0 || !accountNo) {
-      return res.status(400).json({ success: false, message: "Invalid amount or account number" });
-    }
-
-    const orderId = "WDR" + Date.now();
-
-    const payload = {
-      merchant_code: WINYPAY_CONFIG.MERCHANT_CODE,
-      payout_key: WINYPAY_CONFIG.PAYOUT_KEY,
-      order_id: orderId,
-      user_id: userId || "GUEST",
-      amount: Number(amount).toFixed(2),
-      pay_type: payType || "bkash",
-      account_no: accountNo,
-      account_name: accountName || "",
-      current_time: formatDate(new Date()),
-      callback_url: WINYPAY_CONFIG.WITHDRAW_CALLBACK_URL,
-    };
-
-    winypayPayouts[orderId] = {
-      amount: payload.amount,
-      accountNo,
-      status: "pending",
-      createdAt: new Date(),
-    };
-
-    const response = await axios.post(
-      WINYPAY_CONFIG.BASE_URL + WINYPAY_CONFIG.PAYOUT_PATH,
-      payload,
-      { headers: { "Content-Type": "application/json" } }
-    );
-
-    const data = response.data;
-
-    if (data.status === "success") {
-      return res.json({
-        success: true,
-        message: data.message,
-        orderNo: orderId,
-      });
-    } else {
-      winypayPayouts[orderId].status = "failed";
-      return res.status(400).json({
-        success: false,
-        message: data.message || "Payout request failed",
-      });
-    }
-  } catch (err) {
-    console.error("create-payout-winypay error:", err.message);
-    return res.status(500).json({ success: false, message: "Server error" });
-  }
-});
-
-// -----------------------------------------------------------
-// 9. PayOut Callback
-// -----------------------------------------------------------
-app.post("/winypay-payout-callback", (req, res) => {
-  try {
-    const signatureHeader = req.headers["x-callback-sign"];
-    const expectedSign = crypto
-      .createHmac("sha256", WINYPAY_CONFIG.PAYOUT_KEY)
-      .update(req.rawBody)
-      .digest("hex");
-
-    if (signatureHeader !== expectedSign) {
-      console.warn("WinyPay PayOut callback: signature mismatch!");
-      return res.status(400).json({ status: "error" });
-    }
-
-    const { order_id, status: txnStatus } = req.body;
-    console.log("WinyPay PayOut callback:", req.body);
-
-    if (!winypayPayouts[order_id]) {
-      console.warn("Unknown WinyPay payout order:", order_id);
-    } else if (txnStatus === "success") {
-      winypayPayouts[order_id].status = "completed";
-    } else {
-      winypayPayouts[order_id].status = "failed";
-    }
-
-    return res.status(200).json({ status: "success" });
-  } catch (err) {
-    console.error("winypay-payout-callback error:", err.message);
-    return res.status(500).json({ status: "error" });
-  }
-});
-
-// -----------------------------------------------------------
-// 10. Status checks
-// -----------------------------------------------------------
-app.get("/winypay-order-status/:orderNo", (req, res) => {
-  const order = winypayOrders[req.params.orderNo];
+app.get("/watchpay-order-status/:orderNo", (req, res) => {
+  const order = watchpayOrders[req.params.orderNo];
   if (!order) return res.status(404).json({ error: "Order not found" });
   res.json(order);
-});
-
-app.get("/winypay-payout-status/:orderNo", (req, res) => {
-  const payout = winypayPayouts[req.params.orderNo];
-  if (!payout) return res.status(404).json({ error: "Payout not found" });
-  res.json(payout);
 });
 
 // ---------------------------------------------------------
