@@ -7,7 +7,7 @@ const qs = require("querystring");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
-// Firebase Admin ইনিশিয়ালাইজ
+// ১. Firebase ইনিশিয়ালাইজেশন
 const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
@@ -37,7 +37,7 @@ app.use(
 );
 
 // ---------------------------------------------------------
-// 1. CONFIG
+// CONFIG
 // ---------------------------------------------------------
 const CONFIG = {
   MCH_ID: "808258213",
@@ -60,9 +60,6 @@ const WATCHPAY_CONFIG = {
 const orders = {};
 const watchpayOrders = {};
 
-// ---------------------------------------------------------
-// 2. Helpers
-// ---------------------------------------------------------
 function generateSign(params, secretKey) {
   const sortedKeys = Object.keys(params)
     .filter((k) => {
@@ -92,7 +89,7 @@ function formatDate(d) {
 }
 
 // ---------------------------------------------------------
-// 3. NEKpay: Create Order & Callback
+// NEKpay: Create Order & Callback
 // ---------------------------------------------------------
 app.post(["/create-order", "/api/v1/nekpay/create-order"], async (req, res) => {
   try {
@@ -166,12 +163,10 @@ app.post(["/create-order", "/api/v1/nekpay/create-order"], async (req, res) => {
 app.post("/nekpay-callback", async (req, res) => {
   try {
     const body = req.body;
-    console.log("Received NEKpay callback:", body);
-
     const expectedSign = generateSign(body, CONFIG.MCH_KEY);
 
     if (expectedSign !== body.sign) {
-      console.warn("Signature mismatch!");
+      console.warn("NEKpay signature mismatch!");
       return res.status(400).send("fail");
     }
 
@@ -201,19 +196,13 @@ app.post("/nekpay-callback", async (req, res) => {
       return res.status(200).send("success");
     }
   } catch (err) {
-    console.error("callback error:", err.message);
+    console.error("NEKpay callback error:", err.message);
     return res.status(500).send("fail");
   }
 });
 
-app.get("/order-status/:orderNo", (req, res) => {
-  const order = orders[req.params.orderNo];
-  if (!order) return res.status(404).json({ error: "Order not found" });
-  res.json(order);
-});
-
 // ---------------------------------------------------------
-// 4. WatchPay: Create Order & Callback
+// WatchPay: Create Order & Callback
 // ---------------------------------------------------------
 app.post("/create-order-watchpay", async (req, res) => {
   try {
@@ -250,6 +239,7 @@ app.post("/create-order-watchpay", async (req, res) => {
       createdAt: new Date(),
     };
 
+    // ফায়ারবেসে পেন্ডিং ট্রানজেকশন সংরক্ষণ
     await db.collection("deposits").doc(mchOrderNo).set({
       orderNo: mchOrderNo,
       userId: userId || "guest",
@@ -278,7 +268,7 @@ app.post("/create-order-watchpay", async (req, res) => {
       });
     }
   } catch (err) {
-    console.error("create-order error:", err.message);
+    console.error("create-order-watchpay error:", err.message);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -291,7 +281,7 @@ app.post("/watchpay-callback", async (req, res) => {
     const expectedSign = generateSign(body, WATCHPAY_CONFIG.MCH_KEY);
 
     if (expectedSign !== body.sign) {
-      console.warn("WatchPay callback: signature mismatch!");
+      console.warn("WatchPay signature mismatch!");
       return res.status(400).send("fail");
     }
 
@@ -301,6 +291,7 @@ app.post("/watchpay-callback", async (req, res) => {
       const depositAmount = Number(amount);
       const targetUserId = (watchpayOrders[mchOrderNo] && watchpayOrders[mchOrderNo].userId) || merRetMsg;
 
+      // ১. Deposits কালেকশনে সাকসেস স্ট্যাটাস আপডেট
       await db.collection("deposits").doc(mchOrderNo).set({
         orderNo: mchOrderNo,
         userId: targetUserId,
@@ -309,12 +300,12 @@ app.post("/watchpay-callback", async (req, res) => {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
 
+      // ২. Users কালেকশনে স্বয়ংক্রিয় ব্যালেন্স বৃদ্ধি
       if (targetUserId && targetUserId !== "guest" && targetUserId !== "deposit") {
-        const userRef = db.collection("users").doc(targetUserId);
-        await userRef.update({
+        await db.collection("users").doc(targetUserId).update({
           balance: admin.firestore.FieldValue.increment(depositAmount)
         });
-        console.log(`Balance of ${depositAmount} BDT added to user: ${targetUserId}`);
+        console.log(`Successfully added ${depositAmount} to user ${targetUserId}`);
       }
 
       return res.status(200).send("success");
@@ -323,16 +314,16 @@ app.post("/watchpay-callback", async (req, res) => {
       return res.status(200).send("success");
     }
   } catch (err) {
-    console.error("Callback processing error:", err.message);
+    console.error("WatchPay callback error:", err.message);
     return res.status(500).send("fail");
   }
 });
 
-app.get("/watchpay-order-status/:orderNo", (req, res) => {
-  const order = watchpayOrders[req.params.orderNo];
+app.get("/order-status/:orderNo", (req, res) => {
+  const order = orders[req.params.orderNo] || watchpayOrders[req.params.orderNo];
   if (!order) return res.status(404).json({ error: "Order not found" });
   res.json(order);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Payment backend running on port ${PORT}`));
